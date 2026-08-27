@@ -56,8 +56,9 @@ migrations/         # Alembic migration scripts
 - Database migrations via Flask-Migrate
 - Versioned API under `/api/v1`
 - `GET /api/v1/health` health check endpoint
-- Consistent JSON success/error response envelope
-- Centralized error handling for 400, 404, and 500 responses (no internal stack traces exposed)
+- Consistent JSON success/error response envelope for every HTTP error (400, 404, 405, 500, etc.), not just the happy path
+- Centralized error handling: all Werkzeug HTTP exceptions return the standard JSON envelope, and unexpected server errors return a generic 500 with no internal stack trace exposed
+- Fail-fast production configuration: `SECRET_KEY`, `JWT_SECRET_KEY`, and `DATABASE_URL` are required (no insecure fallback values) when `FLASK_ENV=production`
 - JWT extension configured and initialized (auth endpoints not yet implemented)
 
 ## Planned Features
@@ -102,11 +103,11 @@ Documented in [.env.example](.env.example):
 | Variable         | Description                                      | Required |
 |------------------|---------------------------------------------------|----------|
 | `FLASK_ENV`      | `development`, `testing`, or `production`          | No (defaults to `development`) |
-| `SECRET_KEY`     | Flask session signing secret                       | Yes (production) |
-| `JWT_SECRET_KEY` | JWT signing secret                                 | Yes (production) |
-| `DATABASE_URL`   | SQLAlchemy database URI (SQLite locally, PostgreSQL in production) | No (defaults to local SQLite) |
+| `SECRET_KEY`     | Flask session signing secret                       | Yes, in production (no fallback) |
+| `JWT_SECRET_KEY` | JWT signing secret                                 | Yes, in production (no fallback) |
+| `DATABASE_URL`   | SQLAlchemy database URI (SQLite locally, PostgreSQL in production) | Yes, in production (no fallback) |
 
-No secrets are committed to this repository. Development defaults are provided only where safe to do so.
+No secrets are committed to this repository. Development and testing use safe local defaults (SQLite, non-secret placeholder keys). When `FLASK_ENV=production`, the app fails fast at startup with a `RuntimeError` if `SECRET_KEY`, `JWT_SECRET_KEY`, or `DATABASE_URL` are not set — it will never silently fall back to a development default.
 
 ## Running Tests
 

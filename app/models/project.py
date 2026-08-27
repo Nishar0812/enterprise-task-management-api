@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from app.extensions.database import db
+from app.extensions.database import TZDateTime, db
 
 
 class Project(db.Model):
@@ -10,9 +10,11 @@ class Project(db.Model):
     name = db.Column(db.String(150), nullable=False)
     description = db.Column(db.Text, nullable=True)
     owner_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False, index=True)
-    created_at = db.Column(db.DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+    created_at = db.Column(
+        TZDateTime, nullable=False, default=lambda: datetime.now(timezone.utc)
+    )
     updated_at = db.Column(
-        db.DateTime,
+        TZDateTime,
         nullable=False,
         default=lambda: datetime.now(timezone.utc),
         onupdate=lambda: datetime.now(timezone.utc),

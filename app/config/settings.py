@@ -24,10 +24,14 @@ class DevelopmentConfig(BaseConfig):
 class TestingConfig(BaseConfig):
     TESTING = True
     SQLALCHEMY_DATABASE_URI = "sqlite:///:memory:"
+    PROPAGATE_EXCEPTIONS = False
 
 
 class ProductionConfig(BaseConfig):
     DEBUG = False
+
+
+REQUIRED_PRODUCTION_ENV_VARS = ("SECRET_KEY", "JWT_SECRET_KEY", "DATABASE_URL")
 
 
 CONFIG_MAP = {
@@ -39,4 +43,14 @@ CONFIG_MAP = {
 
 def get_config(env_name: str | None = None) -> type[BaseConfig]:
     env_name = env_name or os.environ.get("FLASK_ENV", "development")
-    return CONFIG_MAP.get(env_name, DevelopmentConfig)
+    config = CONFIG_MAP.get(env_name, DevelopmentConfig)
+
+    if config is ProductionConfig:
+        missing = [var for var in REQUIRED_PRODUCTION_ENV_VARS if not os.environ.get(var)]
+        if missing:
+            raise RuntimeError(
+                "Missing required environment variable(s) for production: "
+                + ", ".join(missing)
+            )
+
+    return config

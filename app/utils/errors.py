@@ -17,6 +17,11 @@ def register_error_handlers(app: Flask) -> None:
     def handle_not_found(_error: HTTPException):
         return error_response("Resource not found", "NOT_FOUND", 404)
 
+    @app.errorhandler(HTTPException)
+    def handle_http_exception(error: HTTPException):
+        code = (error.name or "HTTP_ERROR").upper().replace(" ", "_")
+        return error_response(error.description or error.name, code, error.code or 500)
+
     @app.errorhandler(500)
     def handle_internal_error(error: Exception):
         logger.exception("Unhandled server error", exc_info=error)
