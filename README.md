@@ -56,10 +56,13 @@ migrations/         # Alembic migration scripts
 - Database migrations via Flask-Migrate
 - Versioned API under `/api/v1`
 - `GET /api/v1/health` health check endpoint
+- User registration (`POST /api/v1/auth/register`) with Marshmallow-validated input, normalized email, unique-email enforcement, and secure password hashing (never returns password or password hash)
+- Login (`POST /api/v1/auth/login`) that verifies credentials and issues a Flask-JWT-Extended access token; unknown emails and incorrect passwords return an identical generic error so account existence is never revealed
+- Current user lookup (`GET /api/v1/users/me`), protected by JWT bearer authentication
 - Consistent JSON success/error response envelope for every HTTP error (400, 404, 405, 500, etc.), not just the happy path
 - Centralized error handling: all Werkzeug HTTP exceptions return the standard JSON envelope, and unexpected server errors return a generic 500 with no internal stack trace exposed
+- JWT error handling (missing/invalid/expired tokens) also returns the standard JSON envelope instead of Flask-JWT-Extended's default format
 - Fail-fast production configuration: `SECRET_KEY`, `JWT_SECRET_KEY`, and `DATABASE_URL` are required (no insecure fallback values) when `FLASK_ENV=production`
-- JWT extension configured and initialized (auth endpoints not yet implemented)
 
 ## Planned Features
 
@@ -117,9 +120,12 @@ pytest
 
 ## API
 
-| Method | Endpoint           | Description                  |
-|--------|---------------------|-------------------------------|
-| GET    | `/api/v1/health`    | Returns service health status |
+| Method | Endpoint                | Auth required | Description                     |
+|--------|--------------------------|:-------------:|----------------------------------|
+| GET    | `/api/v1/health`         | No            | Returns service health status    |
+| POST   | `/api/v1/auth/register`  | No            | Registers a new user (role defaults to `member`) |
+| POST   | `/api/v1/auth/login`     | No            | Verifies credentials and issues a JWT access token |
+| GET    | `/api/v1/users/me`       | Yes (Bearer JWT) | Returns the authenticated user's profile |
 
 **Response format (success):**
 
@@ -143,7 +149,80 @@ pytest
 }
 ```
 
-Additional endpoints for authentication, users, projects, and tasks will be documented here as they are implemented.
+### POST /api/v1/auth/register
+
+Request:
+
+```json
+{
+  "name": "Nishar",
+  "email": "nishar@example.com",
+  "password": "StrongPassword123!"
+}
+```
+
+- `name` and `email` are required; `email` must be a valid address and is normalized (trimmed, lowercased) before storage and uniqueness checks.
+- `password` is required with a minimum length of 8 characters, and is only ever stored as a secure hash.
+- Every new user is created with `role: "member"`.
+
+Success (`201`):
+
+```json
+{
+  "success": true,
+  "message": "User registered successfully",
+  "data": { "id": 1, "name": "Nishar", "email": "nishar@example.com", "role": "member" },
+  "error": null
+}
+```
+
+A duplicate email returns `409` with `error.code = "EMAIL_ALREADY_EXISTS"`. Invalid input returns `400` with `error.code = "VALIDATION_ERROR"` and per-field messages in `data`.
+
+### POST /api/v1/auth/login
+
+Request:
+
+```json
+{
+  "email": "nishar@example.com",
+  "password": "StrongPassword123!"
+}
+```
+
+Success (`200`):
+
+```json
+{
+  "success": true,
+  "message": "Login successful",
+  "data": {
+    "access_token": "<jwt>",
+    "user": { "id": 1, "name": "Nishar", "email": "nishar@example.com", "role": "member" }
+  },
+  "error": null
+}
+```
+
+An unknown email and an incorrect password both return the same `401` response (`error.code = "INVALID_CREDENTIALS"`), so account existence is never revealed.
+
+### GET /api/v1/users/me
+
+Requires `Authorization: Bearer <access_token>`.
+
+Success (`200`):
+
+```json
+{
+  "success": true,
+  "message": "User retrieved successfully",
+  "data": { "id": 1, "name": "Nishar", "email": "nishar@example.com", "role": "member" },
+  "error": null
+}
+```
+
+A missing, invalid, or expired token returns `401` in the standard error envelope (`error.code` is `"UNAUTHORIZED"` or `"TOKEN_EXPIRED"`).
+
+Project and task CRUD endpoints are not yet implemented and will be documented here as they land.
 
 ## License
 
