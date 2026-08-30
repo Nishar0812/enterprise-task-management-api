@@ -4,7 +4,7 @@ A production-oriented REST API for managing users, projects, and tasks, built wi
 
 ## Overview
 
-The API is being built incrementally, milestone by milestone. This initial milestone establishes the production-oriented application architecture: configuration management, database models, error handling, a consistent response envelope, and a health check endpoint. Authentication and full CRUD functionality for users, projects, and tasks are implemented in subsequent milestones.
+The API is being built incrementally, milestone by milestone. The foundation establishes the production-oriented application architecture: configuration management, database models, error handling, a consistent response envelope, and a health check endpoint. JWT-based user authentication (registration, login, current-user lookup) and full Project CRUD with ownership-based authorization are implemented on top of that foundation. Full CRUD functionality for tasks is implemented in a subsequent milestone.
 
 ## Tech Stack
 
@@ -12,8 +12,8 @@ The API is being built incrementally, milestone by milestone. This initial miles
 - **Flask** — web framework
 - **Flask-SQLAlchemy** — ORM
 - **Flask-Migrate** — database migrations (Alembic)
-- **Flask-JWT-Extended** — JWT authentication (extension wired up; endpoints coming in the next milestone)
-- **Marshmallow** — request/response validation (schemas coming with their respective endpoints)
+- **Flask-JWT-Extended** — JWT authentication (registration, login, and bearer-token-protected endpoints implemented)
+- **Marshmallow** — request/response validation (schemas implemented alongside their respective endpoints)
 - **pytest** — testing
 - **SQLite** — local development database
 - **PostgreSQL** — target production database (via `DATABASE_URL`)
@@ -40,7 +40,7 @@ app/
 ├── config/         # Environment-based configuration
 ├── extensions/     # SQLAlchemy, Migrate, JWT instances
 ├── models/         # User, Project, Task ORM models
-├── routes/         # Flask blueprints (health implemented; auth/users/projects/tasks scaffolded)
+├── routes/         # Flask blueprints (health, auth, users, projects implemented; tasks scaffolded)
 ├── schemas/        # Marshmallow schemas (added alongside their endpoints)
 ├── services/       # Business logic (added alongside their endpoints)
 └── utils/          # Response helpers and error handlers
@@ -59,6 +59,7 @@ migrations/         # Alembic migration scripts
 - User registration (`POST /api/v1/auth/register`) with Marshmallow-validated input, normalized email, unique-email enforcement, and secure password hashing (never returns password or password hash)
 - Login (`POST /api/v1/auth/login`) that verifies credentials and issues a Flask-JWT-Extended access token; unknown emails and incorrect passwords return an identical generic error so account existence is never revealed
 - Current user lookup (`GET /api/v1/users/me`), protected by JWT bearer authentication
+- Full Project CRUD (`POST/GET/PATCH/DELETE /api/v1/projects`) protected by JWT bearer authentication, with strict ownership-based authorization: only a project's owner can view, update, or delete it — including admins and managers, whose roles grant no bypass. Deleting a project cascades to delete its tasks.
 - Consistent JSON success/error response envelope for every HTTP error (400, 404, 405, 500, etc.), not just the happy path
 - Centralized error handling: all Werkzeug HTTP exceptions return the standard JSON envelope, and unexpected server errors return a generic 500 with no internal stack trace exposed
 - JWT error handling (missing/invalid/expired tokens) also returns the standard JSON envelope instead of Flask-JWT-Extended's default format
@@ -66,11 +67,11 @@ migrations/         # Alembic migration scripts
 
 ## Planned Features
 
-- User registration, login, and JWT-based authentication
-- Full CRUD endpoints for users, projects, and tasks
+- Full CRUD endpoints for tasks
 - Request/response validation via Marshmallow schemas
 - Role-based access control
 - API documentation
+- Pagination and filtering for list endpoints
 
 ## Local Development
 
@@ -126,6 +127,11 @@ pytest
 | POST   | `/api/v1/auth/register`  | No            | Registers a new user (role defaults to `member`) |
 | POST   | `/api/v1/auth/login`     | No            | Verifies credentials and issues a JWT access token |
 | GET    | `/api/v1/users/me`       | Yes (Bearer JWT) | Returns the authenticated user's profile |
+| POST   | `/api/v1/projects`       | Yes (Bearer JWT) | Creates a project owned by the authenticated user |
+| GET    | `/api/v1/projects`       | Yes (Bearer JWT) | Lists projects owned by the authenticated user |
+| GET    | `/api/v1/projects/<id>`  | Yes (Bearer JWT) | Returns a project (owner only) |
+| PATCH  | `/api/v1/projects/<id>`  | Yes (Bearer JWT) | Partially updates a project (owner only) |
+| DELETE | `/api/v1/projects/<id>`  | Yes (Bearer JWT) | Deletes a project and its tasks (owner only) |
 
 **Response format (success):**
 
@@ -222,7 +228,105 @@ Success (`200`):
 
 A missing, invalid, or expired token returns `401` in the standard error envelope (`error.code` is `"UNAUTHORIZED"` or `"TOKEN_EXPIRED"`).
 
-Project and task CRUD endpoints are not yet implemented and will be documented here as they land.
+### Projects
+
+All project endpoints require `Authorization: Bearer <access_token>` and enforce **ownership-based authorization**: a project may only be viewed, updated, or deleted by the user in its `owner_id`. This applies regardless of `role` — `admin` and `manager` do not bypass ownership. There is no project-membership concept yet; only the owner has any access.
+
+#### POST /api/v1/projects
+
+Request:
+
+```json
+{
+  "name": "Website Redesign",
+  "description": "Q4 marketing site refresh"
+}
+```
+
+- `name` is required, 1–150 characters (trimmed).
+- `description` is optional and nullable.
+- The authenticated user becomes `owner_id`.
+
+Success (`201`):
+
+```json
+{
+  "success": true,
+  "message": "Project created successfully",
+  "data": {
+    "id": 1,
+    "name": "Website Redesign",
+    "description": "Q4 marketing site refresh",
+    "owner_id": 1,
+    "created_at": "2026-08-30T00:00:00+00:00",
+    "updated_at": "2026-08-30T00:00:00+00:00"
+  },
+  "error": null
+}
+```
+
+Invalid input (missing/blank `name`) returns `400` with `error.code = "VALIDATION_ERROR"`. A non-JSON body returns `400` with `error.code = "INVALID_JSON"`.
+
+#### GET /api/v1/projects
+
+Returns only projects owned by the authenticated user.
+
+Success (`200`):
+
+```json
+{
+  "success": true,
+  "message": "Projects retrieved successfully",
+  "data": [
+    { "id": 1, "name": "Website Redesign", "description": "Q4 marketing site refresh", "owner_id": 1, "created_at": "...", "updated_at": "..." }
+  ],
+  "error": null
+}
+```
+
+#### GET /api/v1/projects/\<id\>
+
+Success (`200`): same shape as the `POST` response's `data` object.
+
+- Unknown `id` returns `404` with `error.code = "NOT_FOUND"`.
+- An `id` that belongs to another user returns `403` with `error.code = "FORBIDDEN"`.
+
+#### PATCH /api/v1/projects/\<id\>
+
+Request (any subset of these fields, at least one required):
+
+```json
+{
+  "name": "Website Redesign 2.0",
+  "description": "Updated scope"
+}
+```
+
+Success (`200`): same shape as the `POST` response's `data` object, reflecting only the fields that were provided.
+
+- An empty body returns `400` with `error.code = "VALIDATION_ERROR"`.
+- Unknown `id` returns `404` with `error.code = "NOT_FOUND"`.
+- An `id` that belongs to another user returns `403` with `error.code = "FORBIDDEN"` and leaves the project unchanged.
+
+#### DELETE /api/v1/projects/\<id\>
+
+Deletes the project and, via cascade, all of its tasks. There is no soft delete.
+
+Success (`200`):
+
+```json
+{
+  "success": true,
+  "message": "Project deleted successfully",
+  "data": null,
+  "error": null
+}
+```
+
+- Unknown `id` returns `404` with `error.code = "NOT_FOUND"`.
+- An `id` that belongs to another user returns `403` with `error.code = "FORBIDDEN"` and leaves the project (and its tasks) intact.
+
+Task CRUD endpoints are not yet implemented and will be documented here as they land.
 
 ## License
 
