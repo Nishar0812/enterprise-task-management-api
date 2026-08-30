@@ -4,7 +4,7 @@ A production-oriented REST API for managing users, projects, and tasks, built wi
 
 ## Overview
 
-The API is being built incrementally, milestone by milestone. The foundation establishes the production-oriented application architecture: configuration management, database models, error handling, a consistent response envelope, and a health check endpoint. JWT-based user authentication (registration, login, current-user lookup) and full Project CRUD with ownership-based authorization are implemented on top of that foundation. Full CRUD functionality for tasks is implemented in a subsequent milestone.
+The API is being built incrementally, milestone by milestone. The foundation establishes the production-oriented application architecture: configuration management, database models, error handling, a consistent response envelope, and a health check endpoint. JWT-based user authentication, full Project CRUD, and full Task CRUD are implemented with ownership-based authorization.
 
 ## Tech Stack
 
@@ -40,7 +40,7 @@ app/
 ├── config/         # Environment-based configuration
 ├── extensions/     # SQLAlchemy, Migrate, JWT instances
 ├── models/         # User, Project, Task ORM models
-├── routes/         # Flask blueprints (health, auth, users, projects implemented; tasks scaffolded)
+├── routes/         # Flask blueprints for health, auth, users, projects, and tasks
 ├── schemas/        # Marshmallow schemas (added alongside their endpoints)
 ├── services/       # Business logic (added alongside their endpoints)
 └── utils/          # Response helpers and error handlers
@@ -60,6 +60,7 @@ migrations/         # Alembic migration scripts
 - Login (`POST /api/v1/auth/login`) that verifies credentials and issues a Flask-JWT-Extended access token; unknown emails and incorrect passwords return an identical generic error so account existence is never revealed
 - Current user lookup (`GET /api/v1/users/me`), protected by JWT bearer authentication
 - Full Project CRUD (`POST/GET/PATCH/DELETE /api/v1/projects`) protected by JWT bearer authentication, with strict ownership-based authorization: only a project's owner can view, update, or delete it — including admins and managers, whose roles grant no bypass. Deleting a project cascades to delete its tasks.
+- Full Task CRUD protected by JWT bearer authentication. Tasks are created and listed under their parent Project, and only that Project's owner can create, list, view, update, or delete them. Assignment does not grant access, and roles do not bypass ownership.
 - Consistent JSON success/error response envelope for every HTTP error (400, 404, 405, 500, etc.), not just the happy path
 - Centralized error handling: all Werkzeug HTTP exceptions return the standard JSON envelope, and unexpected server errors return a generic 500 with no internal stack trace exposed
 - JWT error handling (missing/invalid/expired tokens) also returns the standard JSON envelope instead of Flask-JWT-Extended's default format
@@ -67,8 +68,6 @@ migrations/         # Alembic migration scripts
 
 ## Planned Features
 
-- Full CRUD endpoints for tasks
-- Request/response validation via Marshmallow schemas
 - Role-based access control
 - API documentation
 - Pagination and filtering for list endpoints
@@ -132,6 +131,11 @@ pytest
 | GET    | `/api/v1/projects/<id>`  | Yes (Bearer JWT) | Returns a project (owner only) |
 | PATCH  | `/api/v1/projects/<id>`  | Yes (Bearer JWT) | Partially updates a project (owner only) |
 | DELETE | `/api/v1/projects/<id>`  | Yes (Bearer JWT) | Deletes a project and its tasks (owner only) |
+| POST   | `/api/v1/projects/<project_id>/tasks` | Yes (Bearer JWT) | Creates a task in an owned project |
+| GET    | `/api/v1/projects/<project_id>/tasks` | Yes (Bearer JWT) | Lists tasks in an owned project |
+| GET    | `/api/v1/tasks/<task_id>` | Yes (Bearer JWT) | Returns a task (parent project owner only) |
+| PATCH  | `/api/v1/tasks/<task_id>` | Yes (Bearer JWT) | Partially updates a task (parent project owner only) |
+| DELETE | `/api/v1/tasks/<task_id>` | Yes (Bearer JWT) | Deletes a task (parent project owner only) |
 
 **Response format (success):**
 
@@ -326,7 +330,84 @@ Success (`200`):
 - Unknown `id` returns `404` with `error.code = "NOT_FOUND"`.
 - An `id` that belongs to another user returns `403` with `error.code = "FORBIDDEN"` and leaves the project (and its tasks) intact.
 
-Task CRUD endpoints are not yet implemented and will be documented here as they land.
+### Tasks
+
+All Task endpoints require `Authorization: Bearer <access_token>`. Authorization is inherited from the parent Project: only the user whose ID matches `project.owner_id` can manage the Project's Tasks. An assigned user does not gain Task access, and `admin` or `manager` roles do not bypass ownership.
+
+#### POST /api/v1/projects/\<project_id\>/tasks
+
+Request:
+
+```json
+{
+  "title": "Prepare launch checklist",
+  "description": "Confirm deployment and rollback steps",
+  "status": "in_progress",
+  "priority": "high",
+  "assigned_to": 2
+}
+```
+
+- `title` is required, trimmed, and must contain 1–200 characters.
+- `description` is optional and nullable.
+- `status` defaults to `pending`; accepted values are `pending`, `in_progress`, and `completed`.
+- `priority` defaults to `medium`; accepted values are `low`, `medium`, and `high`.
+- `assigned_to` is optional and nullable. It must identify an existing user. Assignment does not grant access.
+- `project_id` comes from the URL and cannot be changed through Task updates.
+
+Success (`201`):
+
+```json
+{
+  "success": true,
+  "message": "Task created successfully",
+  "data": {
+    "id": 1,
+    "title": "Prepare launch checklist",
+    "description": "Confirm deployment and rollback steps",
+    "status": "in_progress",
+    "priority": "high",
+    "project_id": 1,
+    "assigned_to": 2,
+    "created_at": "2026-08-30T00:00:00+00:00",
+    "updated_at": "2026-08-30T00:00:00+00:00"
+  },
+  "error": null
+}
+```
+
+An unknown Project returns `404`. Another user's Project returns `403`. Invalid input returns `400` with `error.code = "VALIDATION_ERROR"`; malformed JSON returns `400` with `error.code = "INVALID_JSON"`.
+
+#### GET /api/v1/projects/\<project_id\>/tasks
+
+Returns all Tasks belonging to the owned Project as a JSON array. An empty Project returns an empty array. An unknown Project returns `404`, while another user's Project returns `403`.
+
+#### GET /api/v1/tasks/\<task_id\>
+
+Returns the Task representation shown in the create response. An unknown Task returns `404`; a Task whose parent Project belongs to another user returns `403`.
+
+#### PATCH /api/v1/tasks/\<task_id\>
+
+Accepts any non-empty subset of `title`, `description`, `status`, `priority`, and `assigned_to`. Set `description` or `assigned_to` to `null` to clear it. The parent Project cannot be changed.
+
+Success (`200`) returns the updated Task. Empty or invalid input returns `400` with `error.code = "VALIDATION_ERROR"`; an unknown Task returns `404`; another user's Task returns `403` and remains unchanged.
+
+#### DELETE /api/v1/tasks/\<task_id\>
+
+Deletes the Task without deleting its parent Project.
+
+Success (`200`):
+
+```json
+{
+  "success": true,
+  "message": "Task deleted successfully",
+  "data": null,
+  "error": null
+}
+```
+
+An unknown Task returns `404`; another user's Task returns `403` and remains unchanged.
 
 ## License
 
