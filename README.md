@@ -380,7 +380,69 @@ An unknown Project returns `404`. Another user's Project returns `403`. Invalid 
 
 #### GET /api/v1/projects/\<project_id\>/tasks
 
-Returns all Tasks belonging to the owned Project as a JSON array. An empty Project returns an empty array. An unknown Project returns `404`, while another user's Project returns `403`.
+Returns a paginated collection of Tasks belonging to the owned Project. Supported query parameters are:
+
+| Parameter | Default | Accepted values |
+|---|---:|---|
+| `page` | `1` | Integer greater than or equal to 1 |
+| `limit` | `20` | Integer from 1 through 100 |
+| `status` | â€” | `pending`, `in_progress`, `completed` |
+| `priority` | â€” | `low`, `medium`, `high` |
+| `assigned_to` | â€” | Positive user ID |
+| `search` | â€” | Non-empty text, maximum 200 characters |
+| `sort` | `created_at` | `created_at`, `updated_at`, `title`, `status`, `priority` |
+| `order` | `desc` | `asc`, `desc` |
+
+Filters are combined with AND. `assigned_to` filters by ID without requiring the user to exist; a nonexistent positive ID returns an empty result. Assignment never grants access to the Task or its Project.
+
+Search trims surrounding whitespace and performs a case-insensitive literal substring match against the title OR description. SQL wildcard characters such as `%` and `_` are treated literally.
+
+Sorting always uses the Task ID as a deterministic secondary sort key. Priority uses business order (`low < medium < high`) rather than alphabetical order.
+
+Example requests:
+
+```text
+GET /api/v1/projects/1/tasks?page=2&limit=10
+GET /api/v1/projects/1/tasks?status=pending&priority=high
+GET /api/v1/projects/1/tasks?search=authentication&sort=priority&order=asc
+```
+
+Success (`200`):
+
+```json
+{
+  "success": true,
+  "message": "Tasks retrieved successfully",
+  "data": {
+    "tasks": [
+      {
+        "id": 1,
+        "title": "Prepare launch checklist",
+        "description": "Confirm deployment and rollback steps",
+        "status": "in_progress",
+        "priority": "high",
+        "project_id": 1,
+        "assigned_to": 2,
+        "created_at": "2026-08-30T00:00:00+00:00",
+        "updated_at": "2026-08-30T00:00:00+00:00"
+      }
+    ],
+    "pagination": {
+      "page": 1,
+      "limit": 20,
+      "total_items": 1,
+      "total_pages": 1,
+      "has_next": false,
+      "has_previous": false
+    }
+  },
+  "error": null
+}
+```
+
+An empty Project, a filter with no matches, or a page beyond the final page returns `200` with an empty `tasks` array. Invalid, unknown, or repeated scalar query parameters return `400` with `error.code = "VALIDATION_ERROR"`.
+
+Ownership is verified before any Task query executes. An unknown Project returns `404`, while another user's Project returns `403`; filters, search, sorting, and pagination never bypass this rule. Admin and manager roles do not bypass ownership.
 
 #### GET /api/v1/tasks/\<task_id\>
 

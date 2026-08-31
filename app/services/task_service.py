@@ -1,3 +1,7 @@
+from dataclasses import dataclass
+
+from sqlalchemy import case, or_
+
 from app.extensions.database import db
 from app.models.project import Project
 from app.models.task import Task
@@ -14,6 +18,17 @@ class TaskAccessDeniedError(Exception):
 
 class TaskAssigneeNotFoundError(Exception):
     """Raised when a requested assignee does not exist."""
+
+
+@dataclass(frozen=True)
+class TaskPage:
+    tasks: list[Task]
+    page: int
+    limit: int
+    total_items: int
+    total_pages: int
+    has_next: bool
+    has_previous: bool
 
 
 def _validate_assignee(assigned_to: int | None) -> None:
@@ -46,8 +61,71 @@ def create_task(
     return task
 
 
-def list_tasks_for_project(*, project: Project) -> list[Task]:
-    return Task.query.filter_by(project_id=project.id).all()
+def _escape_like(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def list_tasks_for_project(
+    *,
+    project: Project,
+    page: int = 1,
+    limit: int = 20,
+    status: str | None = None,
+    priority: str | None = None,
+    assigned_to: int | None = None,
+    search: str | None = None,
+    sort: str = "created_at",
+    order: str = "desc",
+) -> TaskPage:
+    query = Task.query.filter(Task.project_id == project.id)
+
+    if status is not None:
+        query = query.filter(Task.status == status)
+    if priority is not None:
+        query = query.filter(Task.priority == priority)
+    if assigned_to is not None:
+        query = query.filter(Task.assigned_to == assigned_to)
+    if search is not None:
+        pattern = f"%{_escape_like(search)}%"
+        query = query.filter(
+            or_(
+                Task.title.ilike(pattern, escape="\\"),
+                Task.description.ilike(pattern, escape="\\"),
+            )
+        )
+
+    total_items = query.count()
+    total_pages = (total_items + limit - 1) // limit
+
+    priority_rank = case(
+        (Task.priority == "low", 1),
+        (Task.priority == "medium", 2),
+        (Task.priority == "high", 3),
+        else_=4,
+    )
+    sort_expressions = {
+        "created_at": Task.created_at,
+        "updated_at": Task.updated_at,
+        "title": Task.title,
+        "status": Task.status,
+        "priority": priority_rank,
+    }
+    primary_sort = sort_expressions[sort]
+    order_method = "asc" if order == "asc" else "desc"
+    query = query.order_by(
+        getattr(primary_sort, order_method)(), getattr(Task.id, order_method)()
+    )
+    tasks = query.offset((page - 1) * limit).limit(limit).all()
+
+    return TaskPage(
+        tasks=tasks,
+        page=page,
+        limit=limit,
+        total_items=total_items,
+        total_pages=total_pages,
+        has_next=page < total_pages,
+        has_previous=page > 1,
+    )
 
 
 def get_task_for_project_owner(*, task_id: int, owner_id: int) -> Task:

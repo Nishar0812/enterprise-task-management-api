@@ -1,5 +1,6 @@
 from marshmallow import (
     EXCLUDE,
+    RAISE,
     Schema,
     ValidationError,
     fields,
@@ -9,6 +10,8 @@ from marshmallow import (
 )
 
 from app.models.task import PRIORITY_VALUES, STATUS_VALUES
+
+TASK_SORT_VALUES = ("created_at", "updated_at", "title", "status", "priority")
 
 
 def _normalize_title(data: dict) -> None:
@@ -75,3 +78,28 @@ class TaskSchema(Schema):
     assigned_to = fields.Int(dump_only=True, allow_none=True)
     created_at = fields.DateTime(dump_only=True)
     updated_at = fields.DateTime(dump_only=True)
+
+
+class TaskQuerySchema(Schema):
+    class Meta:
+        unknown = RAISE
+
+    page = fields.Int(load_default=1, validate=validate.Range(min=1))
+    limit = fields.Int(load_default=20, validate=validate.Range(min=1, max=100))
+    status = fields.Str(validate=validate.OneOf(STATUS_VALUES))
+    priority = fields.Str(validate=validate.OneOf(PRIORITY_VALUES))
+    assigned_to = fields.Int(validate=validate.Range(min=1))
+    search = fields.Str(validate=validate.Length(min=1, max=200))
+    sort = fields.Str(
+        load_default="created_at", validate=validate.OneOf(TASK_SORT_VALUES)
+    )
+    order = fields.Str(load_default="desc", validate=validate.OneOf(("asc", "desc")))
+
+    @pre_load
+    def normalize_search(self, data, **kwargs):
+        if not isinstance(data, dict):
+            return data
+        data = dict(data)
+        if isinstance(data.get("search"), str):
+            data["search"] = data["search"].strip()
+        return data

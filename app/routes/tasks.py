@@ -2,7 +2,12 @@ from flask import Blueprint, request
 from flask_jwt_extended import get_jwt_identity, jwt_required
 from marshmallow import ValidationError
 
-from app.schemas.task import TaskCreateSchema, TaskSchema, TaskUpdateSchema
+from app.schemas.task import (
+    TaskCreateSchema,
+    TaskQuerySchema,
+    TaskSchema,
+    TaskUpdateSchema,
+)
 from app.services.project_service import (
     ProjectAccessDeniedError,
     ProjectNotFoundError,
@@ -27,6 +32,7 @@ _create_schema = TaskCreateSchema()
 _update_schema = TaskUpdateSchema()
 _task_schema = TaskSchema()
 _tasks_schema = TaskSchema(many=True)
+_query_schema = TaskQuerySchema()
 
 
 def _project_error_response(error: Exception):
@@ -82,9 +88,37 @@ def list_tasks(project_id: int):
     except (ProjectNotFoundError, ProjectAccessDeniedError) as err:
         return _project_error_response(err)
 
-    tasks = list_tasks_for_project(project=project)
+    repeated = {
+        key: ["Repeated query parameters are not allowed."]
+        for key in request.args
+        if len(request.args.getlist(key)) > 1
+    }
+    if repeated:
+        return error_response(
+            "Validation failed", "VALIDATION_ERROR", 400, data=repeated
+        )
+
+    try:
+        query_params = _query_schema.load(request.args.to_dict(flat=True))
+    except ValidationError as err:
+        return error_response(
+            "Validation failed", "VALIDATION_ERROR", 400, data=err.messages
+        )
+
+    result = list_tasks_for_project(project=project, **query_params)
     return success_response(
-        "Tasks retrieved successfully", data=_tasks_schema.dump(tasks)
+        "Tasks retrieved successfully",
+        data={
+            "tasks": _tasks_schema.dump(result.tasks),
+            "pagination": {
+                "page": result.page,
+                "limit": result.limit,
+                "total_items": result.total_items,
+                "total_pages": result.total_pages,
+                "has_next": result.has_next,
+                "has_previous": result.has_previous,
+            },
+        },
     )
 
 

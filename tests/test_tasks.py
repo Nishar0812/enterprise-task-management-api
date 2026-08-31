@@ -176,9 +176,18 @@ def test_list_own_project_tasks_successfully(client):
 
     assert response.status_code == 200
     assert response.get_json()["message"] == "Tasks retrieved successfully"
-    assert {task["title"] for task in response.get_json()["data"]} == {
+    data = response.get_json()["data"]
+    assert {task["title"] for task in data["tasks"]} == {
         "First",
         "Second",
+    }
+    assert data["pagination"] == {
+        "page": 1,
+        "limit": 20,
+        "total_items": 2,
+        "total_pages": 1,
+        "has_next": False,
+        "has_previous": False,
     }
 
 
@@ -193,7 +202,7 @@ def test_list_tasks_only_for_requested_project(client):
         f"/api/v1/projects/{first_id}/tasks", headers=_auth_header(token)
     )
 
-    tasks = response.get_json()["data"]
+    tasks = response.get_json()["data"]["tasks"]
     assert len(tasks) == 1
     assert tasks[0]["title"] == "First Task"
     assert tasks[0]["project_id"] == first_id
@@ -416,3 +425,267 @@ def test_admin_role_does_not_bypass_task_ownership(app, client):
     assert client.get(
         f"/api/v1/tasks/{task_id}", headers=_auth_header(admin_token)
     ).status_code == 403
+
+
+def _list_tasks(client, token, project_id, query=""):
+    response = client.get(
+        f"/api/v1/projects/{project_id}/tasks{query}", headers=_auth_header(token)
+    )
+    return response, response.get_json()
+
+
+def test_task_pagination_first_middle_last_and_beyond(client):
+    token = _register_and_login(client, "paging@example.com")
+    project_id = _create_project(client, token).get_json()["data"]["id"]
+    for number in range(5):
+        _create_task(client, token, project_id, title=f"Task {number}")
+
+    expected_lengths = {1: 2, 2: 2, 3: 1, 4: 0}
+    seen = []
+    for page, expected_length in expected_lengths.items():
+        response, body = _list_tasks(client, token, project_id, f"?page={page}&limit=2")
+        assert response.status_code == 200
+        assert len(body["data"]["tasks"]) == expected_length
+        pagination = body["data"]["pagination"]
+        assert pagination["total_items"] == 5
+        assert pagination["total_pages"] == 3
+        assert pagination["has_next"] is (page < 3)
+        assert pagination["has_previous"] is (page > 1)
+        seen.extend(task["id"] for task in body["data"]["tasks"])
+
+    assert len(seen) == len(set(seen)) == 5
+
+
+def test_task_pagination_empty_project_and_limit_100(client):
+    token = _register_and_login(client, "empty@example.com")
+    project_id = _create_project(client, token).get_json()["data"]["id"]
+
+    response, body = _list_tasks(client, token, project_id, "?limit=100")
+
+    assert response.status_code == 200
+    assert body["data"] == {
+        "tasks": [],
+        "pagination": {
+            "page": 1,
+            "limit": 100,
+            "total_items": 0,
+            "total_pages": 0,
+            "has_next": False,
+            "has_previous": False,
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "?page=0",
+        "?page=-1",
+        "?page=1.5",
+        "?page=nope",
+        "?limit=0",
+        "?limit=-1",
+        "?limit=1.5",
+        "?limit=nope",
+        "?limit=101",
+        "?assigned_to=0",
+        "?assigned_to=-1",
+        "?assigned_to=nope",
+        "?status=archived",
+        "?priority=urgent",
+        "?sort=id",
+        "?order=sideways",
+        "?search=%20%20%20",
+        f"?search={'x' * 201}",
+        "?unknown=value",
+        "?page=1&page=2",
+    ],
+)
+def test_invalid_task_query_parameters_return_validation_error(client, query):
+    token = _register_and_login(client, "validation@example.com")
+    project_id = _create_project(client, token).get_json()["data"]["id"]
+
+    response, body = _list_tasks(client, token, project_id, query)
+
+    assert response.status_code == 400
+    assert body["error"]["code"] == "VALIDATION_ERROR"
+
+
+@pytest.mark.parametrize("status", ["pending", "in_progress", "completed"])
+def test_filter_tasks_by_status(client, status):
+    token = _register_and_login(client, f"{status}@example.com")
+    project_id = _create_project(client, token).get_json()["data"]["id"]
+    for value in ("pending", "in_progress", "completed"):
+        _create_task(client, token, project_id, title=value, status=value)
+
+    response, body = _list_tasks(client, token, project_id, f"?status={status}")
+
+    assert response.status_code == 200
+    assert [task["status"] for task in body["data"]["tasks"]] == [status]
+
+
+@pytest.mark.parametrize("priority", ["low", "medium", "high"])
+def test_filter_tasks_by_priority(client, priority):
+    token = _register_and_login(client, f"filter-{priority}@example.com")
+    project_id = _create_project(client, token).get_json()["data"]["id"]
+    for value in ("low", "medium", "high"):
+        _create_task(client, token, project_id, title=value, priority=value)
+
+    response, body = _list_tasks(client, token, project_id, f"?priority={priority}")
+
+    assert response.status_code == 200
+    assert [task["priority"] for task in body["data"]["tasks"]] == [priority]
+
+
+def test_assignee_and_combined_filters(client):
+    token = _register_and_login(client, "combined@example.com")
+    _register_and_login(client, "combined-assignee@example.com")
+    with client.application.app_context():
+        assignee_id = User.query.filter_by(email="combined-assignee@example.com").one().id
+    project_id = _create_project(client, token).get_json()["data"]["id"]
+    _create_task(
+        client, token, project_id, title="Match", status="pending",
+        priority="high", assigned_to=assignee_id,
+    )
+    _create_task(client, token, project_id, title="Other", status="completed")
+
+    query = f"?status=pending&priority=high&assigned_to={assignee_id}"
+    response, body = _list_tasks(client, token, project_id, query)
+    missing_response, missing_body = _list_tasks(
+        client, token, project_id, "?assigned_to=99999"
+    )
+
+    assert response.status_code == 200
+    assert [task["title"] for task in body["data"]["tasks"]] == ["Match"]
+    assert missing_response.status_code == 200
+    assert missing_body["data"]["pagination"]["total_items"] == 0
+
+
+def test_searches_title_and_description_case_insensitively(client):
+    token = _register_and_login(client, "search@example.com")
+    project_id = _create_project(client, token).get_json()["data"]["id"]
+    _create_task(client, token, project_id, title="AUTHENTICATION endpoint")
+    _create_task(client, token, project_id, title="Docs", description="Authentication guide")
+    _create_task(client, token, project_id, title="Unrelated", description=None)
+
+    response, body = _list_tasks(client, token, project_id, "?search=%20authentication%20")
+
+    assert response.status_code == 200
+    assert {task["title"] for task in body["data"]["tasks"]} == {
+        "AUTHENTICATION endpoint", "Docs"
+    }
+
+
+@pytest.mark.parametrize(
+    ("search", "matching_title"), [("%", "Uses % literally"), ("_", "Uses _ literally")]
+)
+def test_search_treats_sql_wildcards_literally(client, search, matching_title):
+    token = _register_and_login(client, f"wild-{ord(search)}@example.com")
+    project_id = _create_project(client, token).get_json()["data"]["id"]
+    _create_task(client, token, project_id, title=matching_title)
+    _create_task(client, token, project_id, title="Ordinary")
+
+    response, body = _list_tasks(client, token, project_id, f"?search={search}")
+
+    assert response.status_code == 200
+    assert [task["title"] for task in body["data"]["tasks"]] == [matching_title]
+
+
+def test_search_combines_with_filter_and_can_return_zero_results(client):
+    token = _register_and_login(client, "search-filter@example.com")
+    project_id = _create_project(client, token).get_json()["data"]["id"]
+    _create_task(client, token, project_id, title="Needle", status="pending")
+    _create_task(client, token, project_id, title="Needle done", status="completed")
+
+    _, matching = _list_tasks(client, token, project_id, "?search=needle&status=completed")
+    _, empty = _list_tasks(client, token, project_id, "?search=missing")
+
+    assert [task["title"] for task in matching["data"]["tasks"]] == ["Needle done"]
+    assert empty["data"]["tasks"] == []
+    assert empty["data"]["pagination"]["total_items"] == 0
+
+
+@pytest.mark.parametrize("sort", ["created_at", "updated_at", "title", "status"])
+@pytest.mark.parametrize("order", ["asc", "desc"])
+def test_allowed_task_sorting(client, sort, order):
+    token = _register_and_login(client, f"sort-{sort}-{order}@example.com")
+    project_id = _create_project(client, token).get_json()["data"]["id"]
+    _create_task(client, token, project_id, title="Bravo", status="pending")
+    _create_task(client, token, project_id, title="Alpha", status="completed")
+
+    response, body = _list_tasks(client, token, project_id, f"?sort={sort}&order={order}")
+
+    assert response.status_code == 200
+    values = [task[sort] for task in body["data"]["tasks"]]
+    assert values == sorted(values, reverse=order == "desc")
+
+
+@pytest.mark.parametrize(
+    ("order", "expected"),
+    [("asc", ["low", "medium", "high"]), ("desc", ["high", "medium", "low"])],
+)
+def test_priority_sort_uses_business_rank(client, order, expected):
+    token = _register_and_login(client, f"rank-{order}@example.com")
+    project_id = _create_project(client, token).get_json()["data"]["id"]
+    for priority in ("medium", "high", "low"):
+        _create_task(client, token, project_id, title=priority, priority=priority)
+
+    _, body = _list_tasks(client, token, project_id, f"?sort=priority&order={order}")
+
+    assert [task["priority"] for task in body["data"]["tasks"]] == expected
+
+
+def test_sort_uses_id_as_deterministic_tie_breaker(client):
+    token = _register_and_login(client, "tie@example.com")
+    project_id = _create_project(client, token).get_json()["data"]["id"]
+    first = _create_task(client, token, project_id, title="Same").get_json()["data"]["id"]
+    second = _create_task(client, token, project_id, title="Same").get_json()["data"]["id"]
+
+    _, ascending = _list_tasks(client, token, project_id, "?sort=title&order=asc")
+    _, descending = _list_tasks(client, token, project_id, "?sort=title&order=desc")
+
+    assert [task["id"] for task in ascending["data"]["tasks"]] == [first, second]
+    assert [task["id"] for task in descending["data"]["tasks"]] == [second, first]
+
+
+def test_task_query_features_remain_project_scoped(client):
+    owner_token = _register_and_login(client, "scope-owner@example.com")
+    other_token = _register_and_login(client, "scope-other@example.com")
+    owner_project = _create_project(client, owner_token).get_json()["data"]["id"]
+    other_project = _create_project(client, other_token).get_json()["data"]["id"]
+    _create_task(client, owner_token, owner_project, title="Needle", priority="high")
+    _create_task(client, other_token, other_project, title="Needle", priority="high")
+
+    response, body = _list_tasks(
+        client, owner_token, owner_project, "?search=needle&priority=high&page=1&limit=100"
+    )
+    forbidden, forbidden_body = _list_tasks(
+        client, owner_token, other_project, "?search=needle&page=99&limit=100"
+    )
+
+    assert response.status_code == 200
+    assert body["data"]["pagination"]["total_items"] == 1
+    assert {task["project_id"] for task in body["data"]["tasks"]} == {owner_project}
+    assert forbidden.status_code == 403
+    assert forbidden_body["data"] is None
+
+
+def test_manager_and_assignee_cannot_bypass_project_ownership(app, client):
+    owner_token = _register_and_login(client, "access-owner@example.com")
+    assignee_token = _register_and_login(client, "access-assignee@example.com")
+    with app.app_context():
+        assignee = User.query.filter_by(email="access-assignee@example.com").one()
+        manager = User(name="Manager", email="manager@example.com", role="manager")
+        manager.set_password("StrongPassword123!")
+        db.session.add(manager)
+        db.session.commit()
+        assignee_id = assignee.id
+    manager_token = client.post(
+        "/api/v1/auth/login",
+        json={"email": "manager@example.com", "password": "StrongPassword123!"},
+    ).get_json()["data"]["access_token"]
+    project_id = _create_project(client, owner_token).get_json()["data"]["id"]
+    _create_task(client, owner_token, project_id, assigned_to=assignee_id)
+
+    assert _list_tasks(client, assignee_token, project_id, "?assigned_to=1")[0].status_code == 403
+    assert _list_tasks(client, manager_token, project_id, "?page=1&limit=100")[0].status_code == 403

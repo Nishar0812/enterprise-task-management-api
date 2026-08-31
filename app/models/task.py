@@ -15,6 +15,7 @@ class Task(db.Model):
         db.CheckConstraint(
             "priority IN ('low', 'medium', 'high')", name="ck_tasks_priority"
         ),
+        db.Index("ix_tasks_project_created_id", "project_id", "created_at", "id"),
     )
 
     id = db.Column(db.Integer, primary_key=True)
