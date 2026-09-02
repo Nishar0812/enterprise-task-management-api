@@ -1,5 +1,6 @@
 from app.extensions.database import db
 from app.models.user import User
+from app.services.authorization_service import require_permission
 
 
 class EmailAlreadyRegisteredError(Exception):
@@ -8,6 +9,14 @@ class EmailAlreadyRegisteredError(Exception):
 
 class InvalidCredentialsError(Exception):
     """Raised when login credentials do not match a known, active user."""
+
+
+class UserNotFoundError(Exception):
+    """Raised when a requested user does not exist."""
+
+
+class LastAdminError(Exception):
+    """Raised when an operation would leave the system without an admin."""
 
 
 def register_user(*, name: str, email: str, password: str) -> User:
@@ -33,3 +42,20 @@ def authenticate_user(*, email: str, password: str) -> User:
 
 def get_user_by_id(user_id: int) -> User | None:
     return db.session.get(User, user_id)
+
+
+def change_user_role(*, actor: User, user_id: int, new_role: str) -> User:
+    require_permission(actor, "user:change_role")
+
+    user = db.session.get(User, user_id)
+    if user is None:
+        raise UserNotFoundError()
+
+    if user.role == "admin" and new_role != "admin":
+        admins = User.query.filter_by(role="admin").with_for_update().all()
+        if len(admins) <= 1:
+            raise LastAdminError()
+
+    user.role = new_role
+    db.session.commit()
+    return user

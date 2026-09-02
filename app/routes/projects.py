@@ -1,5 +1,5 @@
 from flask import Blueprint, request
-from flask_jwt_extended import get_jwt_identity, jwt_required
+from flask_jwt_extended import current_user, jwt_required
 from marshmallow import ValidationError
 
 from app.schemas.project import ProjectCreateSchema, ProjectSchema, ProjectUpdateSchema
@@ -36,9 +36,8 @@ def create():
             "Validation failed", "VALIDATION_ERROR", 400, data=err.messages
         )
 
-    owner_id = int(get_jwt_identity())
     project = create_project(
-        owner_id=owner_id, name=data["name"], description=data["description"]
+        owner=current_user, name=data["name"], description=data["description"]
     )
 
     return success_response(
@@ -51,8 +50,7 @@ def create():
 @projects_bp.get("")
 @jwt_required()
 def list_projects():
-    owner_id = int(get_jwt_identity())
-    projects = list_projects_for_owner(owner_id=owner_id)
+    projects = list_projects_for_owner(owner=current_user)
 
     return success_response(
         "Projects retrieved successfully", data=_projects_schema.dump(projects)
@@ -62,10 +60,8 @@ def list_projects():
 @projects_bp.get("/<int:project_id>")
 @jwt_required()
 def get_project(project_id: int):
-    owner_id = int(get_jwt_identity())
-
     try:
-        project = get_project_for_owner(project_id=project_id, owner_id=owner_id)
+        project = get_project_for_owner(project_id=project_id, owner=current_user)
     except ProjectNotFoundError:
         return error_response("Project not found", "NOT_FOUND", 404)
     except ProjectAccessDeniedError:
@@ -92,10 +88,10 @@ def update(project_id: int):
             "Validation failed", "VALIDATION_ERROR", 400, data=err.messages
         )
 
-    owner_id = int(get_jwt_identity())
-
     try:
-        project = get_project_for_owner(project_id=project_id, owner_id=owner_id)
+        project = get_project_for_owner(
+            project_id=project_id, owner=current_user, permission="project:update"
+        )
     except ProjectNotFoundError:
         return error_response("Project not found", "NOT_FOUND", 404)
     except ProjectAccessDeniedError:
@@ -103,7 +99,7 @@ def update(project_id: int):
             "You do not have permission to access this project", "FORBIDDEN", 403
         )
 
-    project = update_project(project=project, updates=data)
+    project = update_project(actor=current_user, project=project, updates=data)
 
     return success_response(
         "Project updated successfully", data=_project_schema.dump(project)
@@ -113,10 +109,10 @@ def update(project_id: int):
 @projects_bp.delete("/<int:project_id>")
 @jwt_required()
 def delete(project_id: int):
-    owner_id = int(get_jwt_identity())
-
     try:
-        project = get_project_for_owner(project_id=project_id, owner_id=owner_id)
+        project = get_project_for_owner(
+            project_id=project_id, owner=current_user, permission="project:delete"
+        )
     except ProjectNotFoundError:
         return error_response("Project not found", "NOT_FOUND", 404)
     except ProjectAccessDeniedError:
@@ -124,6 +120,6 @@ def delete(project_id: int):
             "You do not have permission to access this project", "FORBIDDEN", 403
         )
 
-    delete_project(project=project)
+    delete_project(actor=current_user, project=project)
 
     return success_response("Project deleted successfully", data=None)

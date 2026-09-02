@@ -1,5 +1,5 @@
 from flask import Blueprint, request
-from flask_jwt_extended import get_jwt_identity, jwt_required
+from flask_jwt_extended import current_user, jwt_required
 from marshmallow import ValidationError
 
 from app.schemas.task import (
@@ -65,10 +65,11 @@ def create(project_id: int):
             "Validation failed", "VALIDATION_ERROR", 400, data=err.messages
         )
 
-    owner_id = int(get_jwt_identity())
     try:
-        project = get_project_for_owner(project_id=project_id, owner_id=owner_id)
-        task = create_task(project=project, **data)
+        project = get_project_for_owner(
+            project_id=project_id, owner=current_user, permission="project:update"
+        )
+        task = create_task(actor=current_user, project=project, **data)
     except (ProjectNotFoundError, ProjectAccessDeniedError) as err:
         return _project_error_response(err)
     except TaskAssigneeNotFoundError:
@@ -82,9 +83,8 @@ def create(project_id: int):
 @project_tasks_bp.get("/<int:project_id>/tasks")
 @jwt_required()
 def list_tasks(project_id: int):
-    owner_id = int(get_jwt_identity())
     try:
-        project = get_project_for_owner(project_id=project_id, owner_id=owner_id)
+        project = get_project_for_owner(project_id=project_id, owner=current_user)
     except (ProjectNotFoundError, ProjectAccessDeniedError) as err:
         return _project_error_response(err)
 
@@ -105,7 +105,13 @@ def list_tasks(project_id: int):
             "Validation failed", "VALIDATION_ERROR", 400, data=err.messages
         )
 
-    result = list_tasks_for_project(project=project, **query_params)
+    try:
+        result = list_tasks_for_project(
+            actor=current_user, project=project, **query_params
+        )
+    except TaskAccessDeniedError as err:
+        return _task_error_response(err)
+
     return success_response(
         "Tasks retrieved successfully",
         data={
@@ -125,9 +131,8 @@ def list_tasks(project_id: int):
 @tasks_bp.get("/<int:task_id>")
 @jwt_required()
 def get_task(task_id: int):
-    owner_id = int(get_jwt_identity())
     try:
-        task = get_task_for_project_owner(task_id=task_id, owner_id=owner_id)
+        task = get_task_for_project_owner(task_id=task_id, owner=current_user)
     except (TaskNotFoundError, TaskAccessDeniedError) as err:
         return _task_error_response(err)
 
@@ -150,10 +155,11 @@ def update(task_id: int):
             "Validation failed", "VALIDATION_ERROR", 400, data=err.messages
         )
 
-    owner_id = int(get_jwt_identity())
     try:
-        task = get_task_for_project_owner(task_id=task_id, owner_id=owner_id)
-        task = update_task(task=task, updates=data)
+        task = get_task_for_project_owner(
+            task_id=task_id, owner=current_user, permission="task:update"
+        )
+        task = update_task(actor=current_user, task=task, updates=data)
     except (TaskNotFoundError, TaskAccessDeniedError) as err:
         return _task_error_response(err)
     except TaskAssigneeNotFoundError:
@@ -167,11 +173,12 @@ def update(task_id: int):
 @tasks_bp.delete("/<int:task_id>")
 @jwt_required()
 def delete(task_id: int):
-    owner_id = int(get_jwt_identity())
     try:
-        task = get_task_for_project_owner(task_id=task_id, owner_id=owner_id)
+        task = get_task_for_project_owner(
+            task_id=task_id, owner=current_user, permission="task:delete"
+        )
     except (TaskNotFoundError, TaskAccessDeniedError) as err:
         return _task_error_response(err)
 
-    delete_task(task=task)
+    delete_task(actor=current_user, task=task)
     return success_response("Task deleted successfully", data=None)

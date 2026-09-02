@@ -1,4 +1,6 @@
-from marshmallow import EXCLUDE, Schema, fields, pre_load, validate
+from marshmallow import EXCLUDE, RAISE, Schema, fields, pre_load, validate
+
+from app.models.user import ROLE_VALUES
 
 
 def _normalize_str_field(data: dict, field: str, *, lower: bool = False) -> None:
@@ -52,3 +54,10 @@ class UserSchema(Schema):
     name = fields.Str(dump_only=True)
     email = fields.Email(dump_only=True)
     role = fields.Str(dump_only=True)
+
+
+class RoleUpdateSchema(Schema):
+    class Meta:
+        unknown = RAISE
+
+    role = fields.Str(required=True, validate=validate.OneOf(ROLE_VALUES))

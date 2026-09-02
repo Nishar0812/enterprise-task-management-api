@@ -59,8 +59,10 @@ migrations/         # Alembic migration scripts
 - User registration (`POST /api/v1/auth/register`) with Marshmallow-validated input, normalized email, unique-email enforcement, and secure password hashing (never returns password or password hash)
 - Login (`POST /api/v1/auth/login`) that verifies credentials and issues a Flask-JWT-Extended access token; unknown emails and incorrect passwords return an identical generic error so account existence is never revealed
 - Current user lookup (`GET /api/v1/users/me`), protected by JWT bearer authentication
-- Full Project CRUD (`POST/GET/PATCH/DELETE /api/v1/projects`) protected by JWT bearer authentication, with strict ownership-based authorization: only a project's owner can view, update, or delete it — including admins and managers, whose roles grant no bypass. Deleting a project cascades to delete its tasks.
-- Full Task CRUD protected by JWT bearer authentication. Tasks are created and listed under their parent Project, and only that Project's owner can create, list, view, update, or delete them. Assignment does not grant access, and roles do not bypass ownership.
+- Full Project CRUD (`POST/GET/PATCH/DELETE /api/v1/projects`) protected by JWT bearer authentication and explicit role permissions, with strict ownership-based authorization: only a project's owner can view, update, or delete it — including admins and managers, whose roles grant no bypass. Deleting a project cascades to delete its tasks.
+- Full Task CRUD protected by JWT bearer authentication and explicit role permissions. Tasks are created and listed under their parent Project, and only that Project's owner can create, list, view, update, delete, or assign them. Assignment does not grant access, and roles do not bypass ownership.
+- Hardened current-user resolution loads the live User for every protected request and rejects malformed identities or tokens for deleted users with `401`.
+- Controlled RBAC with default-deny policy checks and an admin-only role-change endpoint. The last remaining admin cannot be demoted.
 - Consistent JSON success/error response envelope for every HTTP error (400, 404, 405, 500, etc.), not just the happy path
 - Centralized error handling: all Werkzeug HTTP exceptions return the standard JSON envelope, and unexpected server errors return a generic 500 with no internal stack trace exposed
 - JWT error handling (missing/invalid/expired tokens) also returns the standard JSON envelope instead of Flask-JWT-Extended's default format
@@ -68,7 +70,6 @@ migrations/         # Alembic migration scripts
 
 ## Planned Features
 
-- Role-based access control
 - API documentation
 - Pagination and filtering for list endpoints
 
@@ -126,6 +127,7 @@ pytest
 | POST   | `/api/v1/auth/register`  | No            | Registers a new user (role defaults to `member`) |
 | POST   | `/api/v1/auth/login`     | No            | Verifies credentials and issues a JWT access token |
 | GET    | `/api/v1/users/me`       | Yes (Bearer JWT) | Returns the authenticated user's profile |
+| PATCH  | `/api/v1/users/<id>/role` | Yes (Admin only) | Changes a user's role, with last-admin protection |
 | POST   | `/api/v1/projects`       | Yes (Bearer JWT) | Creates a project owned by the authenticated user |
 | GET    | `/api/v1/projects`       | Yes (Bearer JWT) | Lists projects owned by the authenticated user |
 | GET    | `/api/v1/projects/<id>`  | Yes (Bearer JWT) | Returns a project (owner only) |
@@ -231,6 +233,50 @@ Success (`200`):
 ```
 
 A missing, invalid, or expired token returns `401` in the standard error envelope (`error.code` is `"UNAUTHORIZED"` or `"TOKEN_EXPIRED"`).
+
+Every protected request also resolves the JWT subject to a current database User. A
+non-numeric/non-positive subject or a token belonging to a deleted user returns `401`
+with `error.code = "UNAUTHORIZED"`; it does not reach route business logic.
+
+### Authorization and roles
+
+Authentication, role authorization, ownership, and assignment are separate checks:
+
+- **Authentication** proves that a JWT is valid and identifies a current User.
+- **Role authorization** checks an explicit permission set. Unknown roles are denied by default.
+- **Ownership** remains mandatory for Project and Task operations, independently of role.
+- **Assignment** associates a User with a Task but grants no Project or Task access.
+
+All three roles can create Projects and can manage only the Projects they own and
+the Tasks belonging to those Projects. `manager` does not gain cross-owner access.
+`admin` does not act as a global Project/Task superuser; its additional permission is
+controlled user-role administration.
+
+| Capability | `member` | `manager` | `admin` |
+|---|:---:|:---:|:---:|
+| Create a self-owned Project | Yes | Yes | Yes |
+| View/update/delete a Project | Own only | Own only | Own only |
+| Create/view/update/delete Tasks | Owned parent Project only | Owned parent Project only | Owned parent Project only |
+| Assign/unassign Tasks | Owned parent Project only | Owned parent Project only | Owned parent Project only |
+| Change user roles | No | No | Yes |
+
+#### PATCH /api/v1/users/\<id\>/role
+
+Only an authenticated `admin` may change a role. The request accepts exactly one
+supported role value:
+
+```json
+{
+  "role": "manager"
+}
+```
+
+Valid values are `admin`, `manager`, and `member`. Invalid values return `400`, a
+missing target returns `404`, and a non-admin receives `403`. The sole remaining
+admin cannot be demoted; that attempt returns `409` with
+`error.code = "LAST_ADMIN_REQUIRED"`. Role decisions use the current database value,
+so a role change applies to subsequent requests even when the User already has an
+access token. User responses never contain passwords or password hashes.
 
 ### Projects
 

@@ -6,6 +6,12 @@ from app.extensions.database import db
 from app.models.project import Project
 from app.models.task import Task
 from app.models.user import User
+from app.services.authorization_service import (
+    AuthorizationDeniedError,
+    require_permission,
+    require_project_ownership,
+    require_task_project_ownership,
+)
 
 
 class TaskNotFoundError(Exception):
@@ -18,6 +24,14 @@ class TaskAccessDeniedError(Exception):
 
 class TaskAssigneeNotFoundError(Exception):
     """Raised when a requested assignee does not exist."""
+
+
+def _authorize_task(user: User, task: Task, permission: str) -> None:
+    try:
+        require_permission(user, permission)
+        require_task_project_ownership(user, task)
+    except AuthorizationDeniedError as error:
+        raise TaskAccessDeniedError() from error
 
 
 @dataclass(frozen=True)
@@ -38,6 +52,7 @@ def _validate_assignee(assigned_to: int | None) -> None:
 
 def create_task(
     *,
+    actor: User,
     project: Project,
     title: str,
     description: str | None = None,
@@ -45,6 +60,13 @@ def create_task(
     priority: str = "medium",
     assigned_to: int | None = None,
 ) -> Task:
+    try:
+        require_permission(actor, "task:create")
+        require_project_ownership(actor, project)
+        if assigned_to is not None:
+            require_permission(actor, "task:assign")
+    except AuthorizationDeniedError as error:
+        raise TaskAccessDeniedError() from error
     _validate_assignee(assigned_to)
     task = Task(
         title=title,
@@ -67,6 +89,7 @@ def _escape_like(value: str) -> str:
 
 def list_tasks_for_project(
     *,
+    actor: User,
     project: Project,
     page: int = 1,
     limit: int = 20,
@@ -77,6 +100,11 @@ def list_tasks_for_project(
     sort: str = "created_at",
     order: str = "desc",
 ) -> TaskPage:
+    try:
+        require_permission(actor, "task:view")
+        require_project_ownership(actor, project)
+    except AuthorizationDeniedError as error:
+        raise TaskAccessDeniedError() from error
     query = Task.query.filter(Task.project_id == project.id)
 
     if status is not None:
@@ -128,18 +156,24 @@ def list_tasks_for_project(
     )
 
 
-def get_task_for_project_owner(*, task_id: int, owner_id: int) -> Task:
+def get_task_for_project_owner(
+    *, task_id: int, owner: User, permission: str = "task:view"
+) -> Task:
     task = db.session.get(Task, task_id)
     if task is None:
         raise TaskNotFoundError()
-    if task.project.owner_id != owner_id:
-        raise TaskAccessDeniedError()
+    _authorize_task(owner, task, permission)
 
     return task
 
 
-def update_task(*, task: Task, updates: dict) -> Task:
+def update_task(*, actor: User, task: Task, updates: dict) -> Task:
+    _authorize_task(actor, task, "task:update")
     if "assigned_to" in updates:
+        try:
+            require_permission(actor, "task:assign")
+        except AuthorizationDeniedError as error:
+            raise TaskAccessDeniedError() from error
         _validate_assignee(updates["assigned_to"])
 
     for field in ("title", "description", "status", "priority", "assigned_to"):
@@ -151,6 +185,7 @@ def update_task(*, task: Task, updates: dict) -> Task:
     return task
 
 
-def delete_task(*, task: Task) -> None:
+def delete_task(*, actor: User, task: Task) -> None:
+    _authorize_task(actor, task, "task:delete")
     db.session.delete(task)
     db.session.commit()
